@@ -1,0 +1,53 @@
+{
+  "name": "@patimweb/pi-zep",
+  "version": "1.0.1",
+  "description": "ZEP time-tracking for pi coding agent — book project times (Projektzeiten) on zep-online.de over plain HTTP, without the paid ZEP API",
+  "keywords": [
+    "pi-package",
+    "zep",
+    "zep-online",
+    "time-tracking",
+    "zeiterfassung",
+    "projektzeiten",
+    "pi-extension"
+  ],
+  "author": "Patrick Weppelmann",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=26.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Smotherer007/pi-zep.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Smotherer007/pi-zep/issues"
+  },
+  "scripts": {
+    "build": "echo 'No build step defined'",
+    "test": "node --test 'tests/**/*.test.ts'",
+    "test:watch": "node --test --watch 'tests/**/*.test.ts'",
+    "typecheck": "tsc --noEmit",
+    "live-check": "node scripts/live-check.ts"
+  },
+  "dependencies": {
+    "typebox": "^1.2.8"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.85.1",
+    "@semantic-release/git": "^10.0.0",
+    "@types/node": "^26.5.1",
+    "semantic-release": "^25.0.0",
+    "typescript": "7.0.2"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ],
+    "image": "https://raw.githubusercontent.com/Smotherer007/pi-zep/main/screenshot.png"
+  }
+}
