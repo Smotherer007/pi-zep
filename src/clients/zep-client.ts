@@ -19,7 +19,7 @@
  *   3. The token rotates: every response hands out the next one.
  */
 
-import type { LoginResult, ZepAccount, ZepBookingRequest, ZepFormData, ZepSaveResult, ZepSession, ZepWeek } from "../types.ts";
+import type { LoginResult, ZepAccount, ZepBookingRequest, ZepFormData, ZepPlan, ZepPlanRequest, ZepPlanSaveRequest, ZepSaveResult, ZepSession, ZepWeek } from "../types.ts";
 import {
   detectSessionLoss,
   durationBetween,
@@ -28,6 +28,7 @@ import {
   extractRequestToken,
   extractSnippetAlert,
   parseAjaxEnvelope,
+  parsePlan,
   parseSelect,
   parseWeek,
   pickWeekTableSnippet,
@@ -41,6 +42,22 @@ const USER_AGENT =
 const SAVE_MGR_ID = "3";
 /** `mgrId` of the read-only Projektzeiten table. */
 const TABLE_MGR_ID = "0";
+
+/** The Projektzeiten page (booking form + week table). */
+const TIME_PAGE = { menu: "ProjektzeitVerwaltungMgr", pageContextId: "Projektzeiten", mgr: "ProjektzeitMgr" };
+/**
+ * The Einplanung page (capacity planning). It is read through its filter form:
+ * `action=filter` answers with the rendered chart, whose options object holds
+ * the planned hours per day and project.
+ */
+const PLAN_PAGE = { menu: "MeineEinplanungVerwaltungMgr", pageContextId: "Einplanung", mgr: "MeineEinplanungMgr" };
+const PLAN_MGR_ID = "0";
+/**
+ * `mgrId` of the Einplanung matrix popup. Saving uses `action=edit&refresh=1`
+ * and the same mgrId - the grid hands over only the cells it marked `edited`,
+ * so a save merges into the existing plan instead of replacing it.
+ */
+const PLAN_SAVE_MGR_ID = "0_0_0_1";
 
 export class ZepError extends Error {
   readonly attemptsLeft?: number;
@@ -308,14 +325,15 @@ export class ZepClient {
     action: string,
     mgrId: string,
     extra: Record<string, string> = {},
+    page: { pageContextId: string; mgr: string } = TIME_PAGE,
   ): { path: string; query: Record<string, string> } {
     if (!this.clientsessid) throw new ZepError("Not logged in.");
     return {
       path: "/view/ajax.php",
       query: {
         CLIENTSESSID: this.clientsessid,
-        pageContextId: "Projektzeiten",
-        mgr: "ProjektzeitMgr",
+        pageContextId: page.pageContextId,
+        mgr: page.mgr,
         mgrId,
         action,
         ...extra,
@@ -330,14 +348,19 @@ export class ZepClient {
   private async ajax(
     action: string,
     mgrId: string,
-    options: { method?: "GET" | "POST"; extra?: Record<string, string>; form?: Record<string, string> } = {},
+    options: {
+      method?: "GET" | "POST";
+      extra?: Record<string, string>;
+      form?: Record<string, string | ReadonlyArray<string>>;
+      page?: { pageContextId: string; mgr: string };
+    } = {},
   ) {
     await this.ensureLogin();
     // A request without a token is answered with a session logout, so never
     // send one: fetch the page first when we do not have a fresh token yet.
     if (!this.requesttoken) await this.fetchPage();
 
-    const { path, query } = this.ajaxUrl(action, mgrId, options.extra);
+    const { path, query } = this.ajaxUrl(action, mgrId, options.extra, options.page);
     const method = options.method ?? "GET";
 
     const headers: Record<string, string> = {
@@ -348,9 +371,13 @@ export class ZepClient {
     let body: string | undefined;
     if (method === "POST") {
       headers["content-type"] = "application/x-www-form-urlencoded; charset=UTF-8";
-      const form = { ...(options.form ?? {}) };
+      const form: Record<string, string | ReadonlyArray<string>> = { ...(options.form ?? {}) };
       if (this.requesttoken) form.requesttoken = this.requesttoken;
-      body = new URLSearchParams(form).toString();
+      const encoded = new URLSearchParams();
+      for (const [key, value] of Object.entries(form)) {
+        for (const item of Array.isArray(value) ? value : [value]) encoded.append(key, item);
+      }
+      body = encoded.toString();
     }
 
     const res = await this.raw(path, { method, headers, body, query });
@@ -374,14 +401,16 @@ export class ZepClient {
     return { form: parseFormData(html), token: this.requesttoken };
   }
 
-  /** Load the Projektzeiten page and pick up its requesttoken. */
-  private async fetchPage(): Promise<string> {
+  /** Load a ZEP page and pick up its requesttoken. */
+  private async fetchPage(
+    page: { menu: string; action?: string } = { menu: TIME_PAGE.menu, action: "save" },
+  ): Promise<string> {
     if (!this.clientsessid) throw new ZepError("Not logged in.");
     const res = await this.raw("/view/index.php", {
       query: {
         CLIENTSESSID: this.clientsessid,
-        menu: "ProjektzeitVerwaltungMgr",
-        action: "save",
+        menu: page.menu,
+        ...(page.action ? { action: page.action } : {}),
       },
     });
     const html = await res.text();
@@ -396,10 +425,12 @@ export class ZepClient {
    * Like `fetchPage`, but recovers once from a stale session by logging in
    * again. Used by the read paths.
    */
-  private async getPageHtml(): Promise<string> {
+  private async getPageHtml(
+    page: { menu: string; action?: string } = { menu: TIME_PAGE.menu, action: "save" },
+  ): Promise<string> {
     await this.ensureLogin();
     try {
-      return await this.fetchPage();
+      return await this.fetchPage(page);
     } catch {
       this.clientsessid = null;
       this.cookies.clear();
@@ -407,7 +438,7 @@ export class ZepClient {
       if (!result.ok) {
         throw new ZepError(result.message ?? "Login failed", result.attemptsLeft);
       }
-      return this.fetchPage();
+      return this.fetchPage(page);
     }
   }
 
@@ -432,6 +463,85 @@ export class ZepClient {
     const envelope = await this.ajax("setKw", TABLE_MGR_ID, { extra: { kwDate } });
     const tableHtml = pickWeekTableSnippet(envelope.snippets)?.data ?? "";
     return parseWeek(tableHtml, kwDate);
+  }
+
+  /**
+   * Read the capacity planning (Einplanung) chart for `from`..`to`.
+   *
+   * The page has no table: the numbers live in the ApexCharts options object
+   * of the chart snippet, which `parsePlan` understands.
+   */
+  async plan(request: ZepPlanRequest): Promise<ZepPlan> {
+    // The Einplanung page carries its own filter form and requesttoken.
+    await this.getPageHtml({ menu: PLAN_PAGE.menu });
+
+    const form: Record<string, string | ReadonlyArray<string>> = {
+      favorit: "NULL",
+      von_bis: "",
+      von_bisquicklinkdata: `${request.from}::${request.to}:`,
+      von: request.from,
+      bis: request.to,
+      projektEinplanung: "1",
+      gestapelt: "1",
+      ff_projektprojektTyp: request.projektTyp ?? "alle",
+      ff_projektstatus: "NULL",
+      ff_projektprojektschlagworteUndOder: "",
+      scale: "0",
+      "Ausführen": "Ausführen",
+    };
+    if (request.projektIds?.length) form["ff_projekt[]"] = request.projektIds;
+
+    const envelope = await this.ajax("filter", PLAN_MGR_ID, {
+      method: "POST",
+      form,
+      page: PLAN_PAGE,
+    });
+
+    const html = envelope.snippets.map((snippet) => snippet.data).join("\n");
+    const plan = parsePlan(html, request.from, request.to);
+    if (!plan) {
+      throw new ZepError(
+        "ZEP returned no readable Einplanung chart. Check the date range (from/to) and that the account has an Einplanung.",
+      );
+    }
+    return plan;
+  }
+
+  /**
+   * Write planned hours/percent into the Einplanung matrix.
+   *
+   * Wire contract taken from the grid's own save handler: the body carries
+   * `edited` as a JSON array of `{p: projektId, d: datum, e: wert, a: 'h'|'%',
+   * b: bemerkung}` entries - `e: null` clears the cell - plus the selection,
+   * the scroll position and the non-working-day switch.
+   */
+  async savePlan(request: ZepPlanSaveRequest): Promise<ZepSaveResult> {
+    // The Einplanung page carries the requesttoken this action needs.
+    await this.getPageHtml({ menu: PLAN_PAGE.menu });
+
+    const edited = request.entries.map((entry) => ({
+      p: entry.projektId,
+      d: entry.date,
+      e: entry.value,
+      // Clearing sends a null unit, exactly like the grid does for a cell it
+      // emptied with the Delete key.
+      a: entry.value === null ? null : entry.unit,
+      b: entry.comment ?? "",
+    }));
+
+    const envelope = await this.ajax("edit", PLAN_SAVE_MGR_ID, {
+      method: "POST",
+      page: PLAN_PAGE,
+      extra: { refresh: "1" },
+      form: {
+        edited: JSON.stringify(edited),
+        selected: JSON.stringify([]),
+        scrollLeft: "0",
+        einplanungAuchAnNichtArbeitstagen: request.auchAnNichtArbeitstagen ? "1" : "0",
+      },
+    });
+
+    return this.verdict(envelope, `${edited.length} Einplanung(en) gespeichert.`);
   }
 
   /**

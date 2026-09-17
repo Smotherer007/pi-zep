@@ -39,6 +39,8 @@ test("extension registers all ZEP tools", async () => {
     "zep_delete",
     "zep_doctor",
     "zep_login",
+    "zep_plan",
+    "zep_plan_set",
     "zep_profile",
     "zep_projects",
     "zep_setup",

@@ -12,7 +12,7 @@ import { durationBetween } from "../clients/zep-parse.ts";
 import { ZepError } from "../clients/zep-client.ts";
 import { updateProfile } from "../config.ts";
 import type { ZepBookingRequest, ZepFormData, ZepOption } from "../types.ts";
-import { errorResult, textResult, toHhMm, toIsoDate, type ToolResult } from "./shared.ts";
+import { errorResult, matchOption, textResult, toHhMm, toIsoDate, type ToolResult } from "./shared.ts";
 
 interface EntryParam {
   von: string;
@@ -308,19 +308,6 @@ export const ZepBookTool = {
     }
   },
 };
-
-/** Match an id exactly first, then an exact label, then a label substring. */
-function matchOption(
-  options: ReadonlyArray<{ id: string; label: string }>,
-  reference: string,
-): { id: string; label: string } | undefined {
-  const needle = reference.trim().toLowerCase();
-  return (
-    options.find((o) => o.id === reference.trim()) ??
-    options.find((o) => o.label.toLowerCase() === needle) ??
-    options.find((o) => o.label.toLowerCase().includes(needle))
-  );
-}
 
 function resolveTaetigkeit(scope: ProjectScope, reference: string | undefined): string {
   if (reference) {

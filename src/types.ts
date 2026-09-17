@@ -156,3 +156,77 @@ export interface SetupParams {
   mandant?: string;
   baseUrl?: string;
 }
+
+// ------------------------------------------------- capacity planning (Einplanung)
+
+/** One project's planned hours on one day. */
+export interface ZepPlanSlice {
+  readonly project: string;
+  readonly hours: number;
+}
+
+/** One day on the Einplanung chart. */
+export interface ZepPlanDay {
+  /** Day label exactly as ZEP prints it: `Heute`, `Morgen` or `19.09.`. */
+  readonly label: string;
+  /** Resolved ISO date of that column. */
+  readonly date: string;
+  /** Available hours from ZEP's `Verfügbarkeit` series, null when absent. */
+  readonly available: number | null;
+  /** Planned hours from ZEP's `gesamt` series. */
+  readonly planned: number;
+  /** Planned hours per project on this day, largest first. */
+  readonly slices: ReadonlyArray<ZepPlanSlice>;
+}
+
+/** A project's planned hours over the whole requested range. */
+export interface ZepPlanProject {
+  readonly project: string;
+  readonly hours: number;
+}
+
+/** Result of reading the Einplanung (capacity planning) chart. */
+export interface ZepPlan {
+  /** Chart title - the employee the plan belongs to. */
+  readonly title: string | null;
+  /** Requested range, ISO dates. */
+  readonly from: string;
+  readonly to: string;
+  /** Range as ZEP prints it in the chart subtitle. */
+  readonly range: string | null;
+  /** Sum of the availability series. */
+  readonly capacity: number;
+  /** Sum of the `gesamt` series. */
+  readonly planned: number;
+  readonly projects: ReadonlyArray<ZepPlanProject>;
+  readonly days: ReadonlyArray<ZepPlanDay>;
+}
+
+export interface ZepPlanRequest {
+  readonly from: string;
+  readonly to: string;
+  /** `alle`, `intern` or `kunden` - ZEP's Projekttyp filter. */
+  readonly projektTyp?: string;
+  /** Project ids for ZEP's Projekt filter. */
+  readonly projektIds?: ReadonlyArray<string>;
+}
+
+/**
+ * One cell of the Einplanung matrix as ZEP stores it.
+ *
+ * ZEP keeps the plan per project and day, either as hours (`h`) or as a
+ * percentage of that day's availability (`%`). `value: null` clears the cell.
+ */
+export interface ZepPlanEntry {
+  readonly projektId: string;
+  readonly date: string;
+  readonly value: number | null;
+  readonly unit: "h" | "%";
+  readonly comment?: string;
+}
+
+export interface ZepPlanSaveRequest {
+  readonly entries: ReadonlyArray<ZepPlanEntry>;
+  /** ZEP's "Einplanung auch an Nicht-Arbeitstagen" switch. */
+  readonly auchAnNichtArbeitstagen?: boolean;
+}

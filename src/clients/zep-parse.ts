@@ -8,7 +8,7 @@
  * tolerant regex parsers rather than a full HTML parser.
  */
 
-import type { ZepBooking, ZepOption, ZepWeek, ZepWeekDay } from "../types.ts";
+import type { ZepBooking, ZepOption, ZepPlan, ZepPlanDay, ZepPlanSlice, ZepWeek, ZepWeekDay } from "../types.ts";
 
 /** Decode the handful of entities ZEP actually uses in labels. */
 export function decodeEntities(input: string): string {
@@ -465,4 +465,287 @@ export function durationBetween(from: string, to: string): string | null {
   const h = Math.floor(diff / 60);
   const min = diff % 60;
   return `${String(h).padStart(2, "0")}:${String(min).padStart(2, "0")}`;
+}
+
+// --------------------------------------------- capacity planning ("Einplanung")
+
+export interface ZepChartSeries {
+  readonly name: string;
+  readonly type?: string;
+  readonly data: ReadonlyArray<number>;
+}
+
+/** The slice of ZEP's ApexCharts options object that carries the plan data. */
+export interface ZepChartOptions {
+  readonly series: ReadonlyArray<ZepChartSeries>;
+  readonly categories: ReadonlyArray<string>;
+  readonly title: string | null;
+  readonly subtitle: string | null;
+}
+
+interface RawChartOptions {
+  series?: unknown;
+  xaxis?: { categories?: unknown };
+  title?: { text?: unknown };
+  subtitle?: { text?: unknown };
+}
+
+/** Trailing `[16,00 h]` ZEP appends to every series name. */
+const SERIES_HOURS_RE = /\s*\[([\d.,]+)\s*h\]\s*$/;
+
+function round2(value: number): number {
+  return Math.round(value * 100) / 100;
+}
+
+/**
+ * Slice a balanced `{...}` or `[...]` block starting at `start`.
+ *
+ * String-aware on purpose: series names are project labels like
+ * `K-10000-00001 (Contoso) [16,00 h]`, so brackets inside string literals
+ * must not be counted as nesting.
+ */
+function sliceBalanced(text: string, start: number): string | null {
+  const open = text[start];
+  if (open !== "{" && open !== "[") return null;
+  const close = open === "{" ? "}" : "]";
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let i = start; i < text.length; i += 1) {
+    const char = text[i]!;
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === '"') inString = false;
+      continue;
+    }
+    if (char === '"') {
+      inString = true;
+      continue;
+    }
+    if (char === open) depth += 1;
+    else if (char === close) {
+      depth -= 1;
+      if (depth === 0) return text.slice(start, i + 1);
+    }
+  }
+  return null;
+}
+
+/**
+ * Turn ZEP's options object into parseable JSON.
+ *
+ * It is JavaScript, not JSON: the axis label and tooltip formatters are real
+ * function expressions (`"formatter":function(val, index) { ... }`). Their
+ * values carry no plan data, so each one is replaced by `null`.
+ */
+function stripJsFunctions(text: string): string {
+  let result = "";
+  let index = 0;
+
+  while (index < text.length) {
+    const found = text.indexOf("function", index);
+    if (found === -1) {
+      result += text.slice(index);
+      break;
+    }
+
+    // Only treat it as code in value position; a project label could contain
+    // the word "function" as text.
+    const before = text.slice(0, found).replace(/\s+$/, "").slice(-1);
+    if (before !== ":" && before !== "," && before !== "[" && before !== "(") {
+      result += text.slice(index, found + "function".length);
+      index = found + "function".length;
+      continue;
+    }
+
+    const bodyStart = text.indexOf("{", found + "function".length);
+    const body = bodyStart === -1 ? null : sliceBalanced(text, bodyStart);
+    // keep everything before the keyword - it is part of the object
+    result += text.slice(index, found) + "null";
+    if (!body) break;
+    index = bodyStart + body.length;
+  }
+  return result;
+}
+
+/**
+ * Replace bare JavaScript identifiers that are not JSON keywords with `null`.
+ *
+ * ZEP's object is JavaScript, not JSON: axis locales arrive as a reference to
+ * the page's global (`"locales":[apex_lang_de]`), which JSON.parse rejects.
+ */
+function neutraliseJsValues(jsonish: string): string {
+  let result = "";
+  let inString = false;
+  let escaped = false;
+  let index = 0;
+
+  while (index < jsonish.length) {
+    const char = jsonish[index]!;
+    if (inString) {
+      result += char;
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === '"') inString = false;
+      index += 1;
+      continue;
+    }
+    if (char === '"') {
+      inString = true;
+      result += char;
+      index += 1;
+      continue;
+    }
+    if (/[A-Za-z_$]/.test(char)) {
+      let end = index;
+      while (end < jsonish.length && /[A-Za-z0-9_$.]/.test(jsonish[end]!)) end += 1;
+      const token = jsonish.slice(index, end);
+      result += token === "true" || token === "false" || token === "null" ? token : "null";
+      index = end;
+      continue;
+    }
+    result += char;
+    index += 1;
+  }
+  return result;
+}
+
+/** Read the ApexCharts options object ZEP embeds next to a chart container. */
+export function extractChartOptions(html: string): ZepChartOptions | null {
+  const marker = /var\s+options\w*\s*=\s*/.exec(html);
+  if (!marker) return null;
+
+  const start = html.indexOf("{", marker.index + marker[0].length);
+  if (start === -1) return null;
+
+  const raw = sliceBalanced(html, start);
+  if (!raw) return null;
+
+  let parsed: RawChartOptions;
+  try {
+    parsed = JSON.parse(neutraliseJsValues(stripJsFunctions(raw))) as RawChartOptions;
+  } catch {
+    return null;
+  }
+
+  const rawSeries = Array.isArray(parsed.series) ? parsed.series : [];
+  const series: ZepChartSeries[] = [];
+  for (const entry of rawSeries) {
+    if (!entry || typeof entry !== "object") continue;
+    const shaped = entry as { name?: unknown; type?: unknown; data?: unknown };
+    if (typeof shaped.name !== "string" || shaped.name === "") continue;
+    series.push({
+      name: shaped.name,
+      type: typeof shaped.type === "string" ? shaped.type : undefined,
+      data: Array.isArray(shaped.data)
+        ? shaped.data.filter((value): value is number => typeof value === "number")
+        : [],
+    });
+  }
+
+  const categories = Array.isArray(parsed.xaxis?.categories)
+    ? parsed.xaxis.categories.filter((value): value is string => typeof value === "string")
+    : [];
+
+  return {
+    series,
+    categories,
+    title: typeof parsed.title?.text === "string" ? parsed.title.text : null,
+    subtitle: typeof parsed.subtitle?.text === "string" ? parsed.subtitle.text : null,
+  };
+}
+
+/** `[16,00 h]` -> 16, `[108,80 h]` -> 108.8 */
+function hoursFromSeriesName(name: string): number | null {
+  const match = SERIES_HOURS_RE.exec(name);
+  if (!match) return null;
+  const value = Number((match[1] ?? "").replace(/\./g, "").replace(",", "."));
+  return Number.isFinite(value) ? value : null;
+}
+
+function addDays(iso: string, days: number): string {
+  const date = new Date(`${iso}T00:00:00Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
+/**
+ * Parse the Einplanung chart into days, capacity and planned hours.
+ *
+ * ZEP renders three kinds of series: `Verfügbarkeit [108,80 h]` (the person's
+ * capacity per day), one `bar` series per project and `gesamt [82,40 h]` (the
+ * daily total). The kind is detected on the name prefix and only falls back to
+ * the chart type.
+ */
+export function parsePlan(html: string, from: string, to: string): ZepPlan | null {
+  const options = extractChartOptions(html);
+  if (!options || options.series.length === 0) return null;
+
+  let availability: ReadonlyArray<number> = [];
+  let totals: ReadonlyArray<number> = [];
+  const projectSeries: Array<{ name: string; data: ReadonlyArray<number>; stated: number | null }> = [];
+
+  for (const series of options.series) {
+    const label = series.name.replace(SERIES_HOURS_RE, "").trim();
+    if (/^verf/i.test(label) || series.type === "area") {
+      availability = series.data;
+    } else if (/^gesamt/i.test(label) || series.type === "line") {
+      totals = series.data;
+    } else {
+      projectSeries.push({ name: label, data: series.data, stated: hoursFromSeriesName(series.name) });
+    }
+  }
+
+  const columnCount = Math.max(
+    options.categories.length,
+    ...options.series.map((series) => series.data.length),
+    0,
+  );
+  if (columnCount === 0) return null;
+
+  const days: ZepPlanDay[] = [];
+  const summed = new Map<string, number>();
+
+  for (let index = 0; index < columnCount; index += 1) {
+    const slices: ZepPlanSlice[] = [];
+    for (const series of projectSeries) {
+      const hours = series.data[index] ?? 0;
+      if (hours <= 0) continue;
+      slices.push({ project: series.name, hours: round2(hours) });
+      summed.set(series.name, round2((summed.get(series.name) ?? 0) + hours));
+    }
+    slices.sort((a, b) => b.hours - a.hours);
+
+    const available = availability[index];
+    const total = totals[index] ?? slices.reduce((sum, slice) => sum + slice.hours, 0);
+
+    days.push({
+      label: options.categories[index] ?? "",
+      date: addDays(from, index),
+      available: available === undefined ? null : round2(available),
+      planned: round2(total ?? 0),
+      slices,
+    });
+  }
+
+  return {
+    title: options.title,
+    from,
+    to,
+    range: options.subtitle,
+    capacity: round2(days.reduce((sum, day) => sum + (day.available ?? 0), 0)),
+    planned: round2(days.reduce((sum, day) => sum + day.planned, 0)),
+    // ZEP states each project's range total in its series name ([16,00 h]);
+    // prefer that number, fall back to our own sum of the days.
+    projects: projectSeries
+      .map((series) => ({
+        project: series.name,
+        hours: series.stated ?? summed.get(series.name) ?? 0,
+      }))
+      .sort((a, b) => b.hours - a.hours),
+    days,
+  };
 }

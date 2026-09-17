@@ -54,6 +54,43 @@ list is rendered server-side, so it only contains the Vorgänge of the project
 the page was rendered for. Posting `formrefresh=true` returns the new
 `<select id="vorgangId">` without saving anything.
 
+### Capacity planning ("Einplanung")
+
+Same `ajax.php`, different page context. The plan page has **no table** — the
+numbers live in an ApexCharts options object inside the snippet:
+
+```js
+var optionschart123 = {"series":[
+  {"name":"Verfügbarkeit [108,80 h]","type":"area","data":[6.4,6.4,0, …]},
+  {"name":"K-10000-00003 (…) [54,40 h]","type":"bar","data":[3.2,3.2,0, …]},
+  {"name":"gesamt [82,40 h]","type":"line","data":[4.8,4.8,0, …]}],
+ "xaxis":{"categories":["Heute","Morgen","19.09.", …]},
+ "title":{"text":"<employee>"},"subtitle":{"text":"17.09.2026-17.10.2026"}}
+```
+
+* Read: `POST ajax.php?…&pageContextId=Einplanung&mgr=MeineEinplanungMgr&mgrId=0&action=filter`
+  with the filter form (`von`, `bis`, `von_bisquicklinkdata`, `projektEinplanung`,
+  `gestapelt`, `ff_projektprojektTyp`, `scale`, `Ausführen`).
+* The object is JavaScript, not JSON: axis locales reference a page global
+  (`"locales":[apex_lang_de]`) and axis/tooltip formatters are real function
+  expressions. Both must be neutralised before `JSON.parse` — `extractChartOptions()`
+  replaces function bodies and bare identifiers with `null`.
+* Series kinds are detected on the name prefix (`Verfügbarkeit`, `gesamt`, else
+  project) and only fall back to the chart type. Project totals are read from the
+  `[54,40 h]` suffix in the series name; the per-day values come from the data array.
+* Write: `POST …&mgr=MeineEinplanungMgr&mgrId=0_0_0_1&action=edit&refresh=1` with
+  `edited=[{p:<projektId>,d:<YYYY-MM-DD>,e:<wert|null>,a:'h'|'%',b:<bemerkung>}]`
+  plus `selected`, `scrollLeft` and `einplanungAuchAnNichtArbeitstagen`. Only the
+  cells the grid marked as *edited* are sent, so a save **merges** into the
+  existing plan instead of replacing it; `e:null` clears a cell.
+* A plan cell is either hours (`a:'h'`) or a percentage of that day's
+  availability (`a:'%'`) — 25 % of a 6,40 h day is 1,60 h, which is how a
+  percentage shows up in the chart.
+* Grid markup: `<td class="pep pepdata at pm <date>" data-datum data-einplanung
+  data-einplanungart data-bemerkung data-stundensatz>`. Rows are the projects
+  (`tr[data-projektid]`), the grid is keyboard driven (digits, `%` suffix,
+  Enter = save, Delete = clear).
+
 ### Response shapes (verified against the live server)
 
 | Outcome | `error` | `javascript` | content |
@@ -87,7 +124,9 @@ Other message texts observed:
 * The save response ships a *calendar* snippet targeting `managerdiv_ProjektzeitMgr`, which must not be mistaken for the week table.
 * The ISO date of a day row is in `id="day_YYYY-MM-DD"` (fallback: the `openMahlzeiten(this, 'YYYY-MM-DD')` onclick, then the weekday + `DD.MM.` label).
 * A day row's label is split across `<div>Do</div><div>17.09.</div>`, so plain `innerText` yields `Do17.09.` while tag-stripping yields `Do 17.09.` — parse the latter.
-* Booking rows have 10 cells (`action, von, bis, Dauer, action, Projekt, Vorgang, Tät., fakturierbar, Bemerkung`); the `class="luecke"` spacer rows in between have 1 and must be skipped; the sum row has 3.
+* The **first booking of a day is rendered inside the day row itself** — its label cell carries `rowspan`, so that row holds 12–13 cells. Further bookings of the same day follow as standalone rows, separated by a `class="luecke"` spacer (1 cell). A parser that only knows standalone rows silently drops the day's first booking and attaches the remaining ones to the *previous* day.
+* Booking columns are therefore read relative to the `von` cell: `von, bis, Dauer, ·, Projekt, Vorgang, Tät., fakturierbar, Bemerkung[, Ort]`.
+* The optional last cell is the `Ort` (place of work). It carries no `data-columnid` of its own and ZEP renders it only when there is something to report; a trailing `*` marks a deviation from the default, and a missing cell means `NULL` (Erste Tätigkeitsstätte).
 
 ## Tools
 
@@ -101,6 +140,8 @@ Other message texts observed:
 | `zep_week` | Week overview: bookings with row id, times, duration, sum, under-booked days |
 | `zep_book` | Create bookings — one block or an `entries` array; `dryRun` supported |
 | `zep_delete` | Delete a booking by row id |
+| `zep_plan` | Capacity planning (Einplanung): planned hours per day and project, availability, utilization |
+| `zep_plan_set` | Write into the Einplanung matrix: hours or percent per project and day, or clear a cell |
 
 ## Usage
 
@@ -137,6 +178,9 @@ The full write cycle was exercised against the real system on 2026-09-17:
 form re-render for another project, a booking created and confirmed in the week
 table, then deleted and confirmed gone. A rejected booking (plan hours
 exhausted) and a rejected Tätigkeit were reproduced as well.
+
+The capacity planning was exercised the same day: the Einplanung chart was read
+(read path) and a matrix cell was written and read back (`zep_plan_set`).
 
 What is *not* covered by that test run: a successful password login, because
 that requires the account password. The endpoint, the field names and the

@@ -14,6 +14,8 @@
  *   - zep_week:     read the Projektzeiten week overview
  *   - zep_book:     create bookings (one or several blocks)
  *   - zep_delete:   delete a booking
+ *   - zep_plan:     read the capacity planning (Einplanung / Kapa-Planung)
+ *   - zep_plan_set: write planned hours into the Einplanung matrix
  *
  * Design:
  *   - types.ts                  plain data shapes
@@ -36,6 +38,8 @@ import { ZepProjectsTool } from "./src/tools/zep-projects.ts";
 import { ZepWeekTool } from "./src/tools/zep-week.ts";
 import { ZepBookTool } from "./src/tools/zep-book.ts";
 import { ZepDeleteTool } from "./src/tools/zep-delete.ts";
+import { ZepPlanTool } from "./src/tools/zep-plan.ts";
+import { ZepPlanSetTool } from "./src/tools/zep-plan-set.ts";
 
 export default function (pi: ExtensionAPI) {
   loadConfig();
@@ -49,4 +53,6 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool(ZepWeekTool);
   pi.registerTool(ZepBookTool);
   pi.registerTool(ZepDeleteTool);
+  pi.registerTool(ZepPlanTool);
+  pi.registerTool(ZepPlanSetTool);
 }

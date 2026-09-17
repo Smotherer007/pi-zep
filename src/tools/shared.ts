@@ -42,3 +42,26 @@ export function toHhMm(value: string): string {
   if (hourOnly) return `${hourOnly[1]!.padStart(2, "0")}:00`;
   throw new Error(`Unparseable time: "${value}" (use HH:MM)`);
 }
+
+/**
+ * Match an id exactly first, then an exact label, then a label substring.
+ * Used by every tool that accepts "id or part of the label".
+ */
+export function matchOption<T extends { id: string; label: string }>(
+  options: ReadonlyArray<T>,
+  reference: string,
+): T | undefined {
+  const needle = reference.trim().toLowerCase();
+  return (
+    options.find((option) => option.id === reference.trim()) ??
+    options.find((option) => option.label.toLowerCase() === needle) ??
+    options.find((option) => option.label.toLowerCase().includes(needle))
+  );
+}
+
+/** Shift an ISO date by whole days. */
+export function addDays(iso: string, days: number): string {
+  const date = new Date(`${iso}T00:00:00Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+}

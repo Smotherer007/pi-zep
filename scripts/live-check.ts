@@ -16,7 +16,8 @@
 import { loadConfig, getActiveProfileName, getProfile, saveSession } from "../src/config.ts";
 import { ZepClient } from "../src/clients/zep-client.ts";
 import { durationBetween, mondayOf } from "../src/clients/zep-parse.ts";
-import { formatFormData, formatWeek } from "../src/formatting/formatters.ts";
+import { formatFormData, formatPlan, formatWeek } from "../src/formatting/formatters.ts";
+import { addDays } from "../src/tools/shared.ts";
 
 const args = process.argv.slice(2);
 const flag = (name: string) => args.includes(`--${name}`);
@@ -68,6 +69,9 @@ const { form } = await client.loadForm();
 console.log("\n=== form ===");
 console.log(formatFormData(form));
 
+console.log("\n=== Einplanung (capacity planning) ===");
+console.log(formatPlan(await client.plan({ from: date, to: addDays(date, 30) })));
+
 if (!doWrite) {
   console.log("\n(read-only run; pass --write to also exercise a booking + delete)");
   process.exit(0);
@@ -112,4 +116,37 @@ const afterDelete = await client.week(kwDate);
 const dayAfter = afterDelete.days.find((d) => d.date === date);
 const stillThere = dayAfter?.bookings.some((b) => b.comment.includes("API-Test (pi)"));
 console.log(`verify: booking ${stillThere ? "STILL PRESENT" : "removed"}`);
-process.exit(stillThere ? 1 : 0);
+if (stillThere) process.exit(1);
+
+// --- capacity planning: create a 1 h plan entry, verify it, clear it again
+console.log("\n=== Einplanung write test ===");
+const planDate = value("plan-date") ?? addDays(date, value("plan-offset") ? Number(value("plan-offset")) : 60);
+console.log(`plan cell: projekt ${projektId} on ${planDate}`);
+
+const planned = await client.savePlan({
+  entries: [{ projektId, date: planDate, value: 1, unit: "h" }],
+});
+console.log(planned.ok ? `plan save: OK (${planned.message})` : `plan save: REJECTED - ${planned.error}`);
+if (!planned.ok) process.exit(1);
+
+// The plan is per project, so the check must look at that project's slice -
+// other projects may well be planned on the same day.
+const projektLabel = form.projects.find((option) => option.id === projektId)?.label;
+const hasOurCell = (day: { slices: ReadonlyArray<{ project: string; hours: number }> } | undefined) =>
+  day?.slices.some((slice) => slice.hours === 1 && (projektLabel ? slice.project === projektLabel : true)) ??
+  false;
+
+const planAfterSave = await client.plan({ from: planDate, to: planDate });
+const createdCell = hasOurCell(planAfterSave.days[0]);
+console.log(createdCell ? `verify: 1,00 h planned on ${planDate}` : "verify: NOT FOUND in the plan");
+if (!createdCell) process.exit(1);
+
+const cleared = await client.savePlan({
+  entries: [{ projektId, date: planDate, value: null, unit: "h" }],
+});
+console.log(cleared.ok ? "plan clear: OK" : `plan clear: FAILED - ${cleared.error}`);
+
+const planAfterClear = await client.plan({ from: planDate, to: planDate });
+const stillPlanned = hasOurCell(planAfterClear.days[0]);
+console.log(`verify: plan cell ${stillPlanned ? "STILL PRESENT" : "cleared"}`);
+process.exit(stillPlanned ? 1 : 0);

@@ -15,6 +15,7 @@ import { test } from "node:test";
 
 import { ZepClient, ZepError } from "../src/clients/zep-client.ts";
 import type { ZepAccount } from "../src/types.ts";
+import { PLAN_CHART_SNIPPET } from "./fixtures/plan-snippet.ts";
 
 const ACCOUNT: ZepAccount = {
   name: "test",
@@ -431,4 +432,102 @@ test("login() refuses to send an empty password instead of burning a lockout att
   });
 
   assert.equal(calls.length, 0, "no request may leave the process");
+});
+
+test("plan() posts the Einplanung filter and reads the chart out of the snippet", async () => {
+  const { calls } = stubFetch([
+    ...loginSequence("sid7"),
+    // the Einplanung page, which carries the requesttoken for this context
+    { status: 200, body: TOKEN_PAGE },
+    {
+      status: 200,
+      body: JSON.stringify({
+        schnipsel: {
+          name: "schnipsel",
+          type: "schnipsel",
+          target: "filtersectiondiv_MeineEinplanungFilterFormMgr0",
+          data: PLAN_CHART_SNIPPET,
+        },
+        requesttoken: "ROTATED",
+      }),
+    },
+  ]);
+
+  const client = new ZepClient(ACCOUNT);
+  assert.equal((await client.login()).ok, true);
+
+  const plan = await client.plan({ from: "2026-09-17", to: "2026-09-20" });
+  assert.equal(plan.capacity, 19.2);
+  assert.equal(plan.planned, 23.2);
+  assert.equal(plan.days.length, 4);
+  assert.equal(plan.projects.length, 3);
+
+  const filter = calls.at(-1)!;
+  const url = new URL(filter.url);
+  assert.equal(filter.method, "POST");
+  assert.equal(url.searchParams.get("pageContextId"), "Einplanung");
+  assert.equal(url.searchParams.get("mgr"), "MeineEinplanungMgr");
+  assert.equal(url.searchParams.get("mgrId"), "0");
+  assert.equal(url.searchParams.get("action"), "filter");
+  assert.equal(url.searchParams.get("json"), "true");
+  assert.equal(url.searchParams.get("ajax"), "1");
+
+  const body = new URLSearchParams(filter.body ?? "");
+  assert.equal(body.get("von"), "2026-09-17");
+  assert.equal(body.get("bis"), "2026-09-20");
+  assert.equal(body.get("von_bisquicklinkdata"), "2026-09-17::2026-09-20:");
+  assert.equal(body.get("projektEinplanung"), "1");
+  assert.equal(body.get("ff_projektprojektTyp"), "alle");
+  assert.equal(body.get("scale"), "0");
+  assert.ok(body.get("requesttoken"), "the token travels in the body as well");
+  assert.match(calls.at(-2)!.url, /menu=MeineEinplanungVerwaltungMgr/);
+});
+
+test("savePlan() posts the edited cells the way the Einplanung grid does", async () => {
+  const { calls } = stubFetch([
+    ...loginSequence("sid8"),
+    { status: 200, body: TOKEN_PAGE },
+    {
+      status: 200,
+      body: JSON.stringify({
+        name: "response",
+        requesttoken: "ROTATED",
+        javascript: "dispatchZepEvent('zep-einplanung-gespeichert');",
+        error: null,
+      }),
+    },
+  ]);
+
+  const client = new ZepClient(ACCOUNT);
+  assert.equal((await client.login()).ok, true);
+
+  const result = await client.savePlan({
+    entries: [
+      { projektId: "371", date: "2026-10-12", value: 8, unit: "h", comment: "Kapa" },
+      { projektId: "413", date: "2026-09-17", value: 25, unit: "%" },
+      { projektId: "413", date: "2026-09-18", value: null, unit: "h" },
+    ],
+  });
+  assert.equal(result.ok, true);
+
+  const save = calls.at(-1)!;
+  const url = new URL(save.url);
+  assert.equal(save.method, "POST");
+  assert.equal(url.searchParams.get("pageContextId"), "Einplanung");
+  assert.equal(url.searchParams.get("mgr"), "MeineEinplanungMgr");
+  assert.equal(url.searchParams.get("mgrId"), "0_0_0_1");
+  assert.equal(url.searchParams.get("action"), "edit");
+  assert.equal(url.searchParams.get("refresh"), "1");
+
+  const body = new URLSearchParams(save.body ?? "");
+  assert.deepEqual(JSON.parse(body.get("edited")!), [
+    { p: "371", d: "2026-10-12", e: 8, a: "h", b: "Kapa" },
+    { p: "413", d: "2026-09-17", e: 25, a: "%", b: "" },
+    // clearing sends a null unit, exactly like the Delete key in the grid
+    { p: "413", d: "2026-09-18", e: null, a: null, b: "" },
+  ]);
+  assert.deepEqual(JSON.parse(body.get("selected")!), []);
+  assert.equal(body.get("scrollLeft"), "0");
+  assert.equal(body.get("einplanungAuchAnNichtArbeitstagen"), "0");
+  assert.equal(save.headers["x-requesttoken"], "7e6025829eb894e14707");
 });

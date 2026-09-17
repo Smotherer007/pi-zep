@@ -2,7 +2,7 @@
  * Pure functions that turn ZEP domain data into text for the model/user.
  */
 
-import type { ZepFormData, ZepSaveResult, ZepWeek } from "../types.ts";
+import type { ZepFormData, ZepPlan, ZepPlanEntry, ZepSaveResult, ZepWeek } from "../types.ts";
 
 function pad(value: string, width: number): string {
   return value.length >= width ? value : value + " ".repeat(width - value.length);
@@ -90,4 +90,74 @@ export function formatMoneyTable(headers: ReadonlyArray<string>, rows: ReadonlyA
   const line = (cells: ReadonlyArray<string>) =>
     cells.map((c, i) => pad(c ?? "", widths[i] ?? 0)).join("  ").trimEnd();
   return [line(headers), widths.map((w) => "-".repeat(w)).join("  "), ...rows.map(line)].join("\n");
+}
+
+// ------------------------------------------------- capacity planning (Einplanung)
+
+/** `16` -> `16,00` (ZEP prints hours with a comma). */
+function formatHours(value: number): string {
+  return value.toFixed(2).replace(".", ",");
+}
+
+const WEEKDAYS = ["So", "Mo", "Di", "Mi", "Do", "Fr", "Sa"] as const;
+
+function dayParts(iso: string): { weekday: string; short: string } {
+  const date = new Date(`${iso}T00:00:00Z`);
+  const weekday = WEEKDAYS[date.getUTCDay()] ?? "??";
+  const short = `${String(date.getUTCDate()).padStart(2, "0")}.${String(date.getUTCMonth() + 1).padStart(2, "0")}.`;
+  return { weekday, short };
+}
+
+export function formatPlan(plan: ZepPlan): string {
+  const lines: string[] = [];
+  lines.push(`Einplanung${plan.title ? ` ${plan.title}` : ""}  (${plan.range ?? `${plan.from} - ${plan.to}`})`);
+
+  const utilization = plan.capacity > 0 ? Math.round((plan.planned / plan.capacity) * 100) : null;
+  const overBooked = plan.days.filter(
+    (day) => day.available !== null && day.planned > day.available + 0.001,
+  ).length;
+
+  lines.push(
+    `Kapazität ${formatHours(plan.capacity)} h | geplant ${formatHours(plan.planned)} h` +
+      `${utilization === null ? "" : ` | Auslastung ${utilization} %`}` +
+      `${overBooked > 0 ? ` | ${overBooked} Tag(e) überbucht` : ""}`,
+  );
+  lines.push("");
+
+  const plannedDays = plan.days.filter((day) => day.planned > 0);
+  if (plannedDays.length === 0) {
+    lines.push("(keine Einplanung im Zeitraum)");
+  }
+  for (const day of plannedDays) {
+    const { weekday, short } = dayParts(day.date);
+    const slices = day.slices
+      .map((slice) => `${slice.project} ${formatHours(slice.hours)}`)
+      .join(" | ");
+    lines.push(
+      `${weekday} ${short}  ${formatHours(day.planned)}` +
+        `${day.available === null ? "" : ` / ${formatHours(day.available)}`} h  ${slices}`,
+    );
+  }
+
+  if (plan.projects.length > 0) {
+    lines.push("", "Planstunden je Projekt:");
+    for (const project of plan.projects) {
+      lines.push(`    ${formatHours(project.hours).padStart(6)} h  ${project.project}`);
+    }
+  }
+
+  return lines.join("\n").trimEnd();
+}
+
+/** One line per changed cell, used by zep_plan_set. */
+export function formatPlanEntries(entries: ReadonlyArray<ZepPlanEntry>): string {
+  return entries
+    .map((entry) => {
+      const value =
+        entry.value === null ? "geleert" : `${formatHours(entry.value)} ${entry.unit === "%" ? "%" : "h"}`;
+      return `    ${entry.date}  Projekt ${entry.projektId}  ${value}${
+        entry.comment ? `  "${entry.comment}"` : ""
+      }`;
+    })
+    .join("\n");
 }
