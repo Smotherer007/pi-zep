@@ -298,12 +298,50 @@ function resolveDayDate(dayLabel: string, kwDate: string): string | null {
 }
 
 /**
+ * Label of a day row: `Do 17.09.`.
+ *
+ * The label cell also carries the meals/breaks icons, whose text content is
+ * literally `restaurant` / `local_cafe`; taking the plain text of the cell
+ * would render as `Do 17.09. restaurant`. Prefer the dedicated weekday and
+ * day/month divs and only fall back to text surgery.
+ */
+function dayRowLabel(cellHtml: string, joined: string): string {
+  const weekday = /class="modimidofrsaso"[^>]*>\s*([A-Za-z]{2})\s*</.exec(cellHtml)?.[1];
+  const dayMonth = /class="tag_monat"[^>]*>\s*([0-9]{2}\.[0-9]{2}\.)\s*</.exec(cellHtml)?.[1];
+  if (weekday && dayMonth) return `${weekday} ${dayMonth}`;
+
+  return joined
+    .split(/\s{2,}/)[0]!
+    .replace(/\s*(restaurant|local_cafe)\b.*$/i, "")
+    .trim();
+}
+
+/**
+ * Place of work of a booking row, or null when ZEP does not render it.
+ *
+ * The Ort cell is the row's last column (`von` + 9) and, unlike the other
+ * metadata columns, it carries no `data-columnid` of its own. ZEP only emits
+ * it when there is something to report, so an absent cell means the booking
+ * sits on the default place of work (`NULL`). A trailing `*` marks a
+ * deviation from that default and is not part of the value.
+ */
+function bookingOrt(flat: ReadonlyArray<string>, from: number): string | null {
+  return (flat[from + 9] ?? "").replace(/[\s*]+$/, "").trim() || null;
+}
+
+/**
  * Parse the week table rendered into `#ProjektzeitTableDiv`.
  *
- * Row shapes observed on the live system:
- *   day row      `["Do 17.09. restaurant", ...]`   (icons = meals/breaks)
- *   booking row  `["editdelete", von, bis, Dauer, "", Projekt, Vorgang, Taet, "payments", Bemerkung]`
- *   sum row      `["Summe", "8,00", "payments 8,00"]`
+ * Row shapes observed on the live system (2026-09-17, ZEP v7.13.88):
+ *
+ *   day, no bookings   `["Do 17.09. restaurant", ""]`
+ *   day, with bookings `["Do 17.09. restaurant", "", "editdelete", von, bis, Dauer, "", Projekt, Vorgang, Taet, fakturierbar, Bemerkung, Ort]`
+ *   further bookings   `["editdelete", von, bis, Dauer, "", Projekt, Vorgang, Taet, "payments", Bemerkung, Ort]`
+ *   sum row            `["Summe", "4,00", ...]`
+ *
+ * The day's FIRST booking is rendered inside the day row itself (the label
+ * cell then has `rowspan=N`), which is why the booking columns must be read
+ * relative to the first `HH:MM` cell rather than at a fixed offset.
  */
 export function parseWeek(tableHtml: string, kwDate: string): ZepWeek {
   const days: ZepWeekDay[] = [];
@@ -341,19 +379,22 @@ export function parseWeek(tableHtml: string, kwDate: string): ZepWeek {
     // --- day header -------------------------------------------------------
     const joined = flat.join(" ").trim();
     const dayMatch = DAY_RE.exec(joined);
-    if (dayMatch && cells.length <= 3) {
+    // A day row is identified by its `id="day_YYYY-MM-DD"` cell; the label
+    // text is only used as a fallback so that a markup change in the label
+    // cannot silently re-attach a day's bookings to the previous day.
+    const dayId =
+      /id="day_(\d{4}-\d{2}-\d{2})"/.exec(row.html) ??
+      /openMahlzeiten\s*\(\s*this\s*,\s*'(\d{4}-\d{2}-\d{2})'/.exec(row.html);
+    if (dayId || (dayMatch && cells.length <= 3)) {
       flush();
-      const iso =
-        /id="day_(\d{4}-\d{2}-\d{2})"/.exec(row.html) ??
-        /openMahlzeiten\s*\(\s*this\s*,\s*'(\d{4}-\d{2}-\d{2})'/.exec(row.html);
-      const label = joined.split(/\s{2,}/)[0] ?? joined;
+      const label = dayRowLabel(cells[0] ?? "", joined) || joined;
       current = {
         label,
-        date: iso?.[1] ?? resolveDayDate(label, kwDate),
+        date: dayId?.[1] ?? resolveDayDate(label, kwDate),
         bookings: [],
         classes: row.classes,
       };
-      continue;
+      // deliberately no `continue`: this row may carry the day's first booking
     }
 
     if (!current) continue;
@@ -368,22 +409,26 @@ export function parseWeek(tableHtml: string, kwDate: string): ZepWeek {
     }
 
     // --- booking row ------------------------------------------------------
-    const from = /^\d{2}:\d{2}$/.test(flat[1] ?? "");
-    if (!from) continue;
+    // Anchor on the `von` cell: cell 1 in a standalone booking row, cell 3
+    // behind the label in a day row that carries its first booking.
+    const from = flat.findIndex((c, index) => index > 0 && /^\d{2}:\d{2}$/.test(c));
+    if (from === -1) continue;
 
-    const objectId = /objectId=(\d+)/.exec(row.html)?.[1] ?? null;
+    const objectId =
+      /objectId=?(\d+)/.exec(row.html)?.[1] ?? null;
     current.bookings.push({
       objectId,
       dayLabel: current.label,
       date: current.date,
-      from: flat[1] ?? "",
-      to: flat[2] ?? "",
-      duration: flat[3] ?? "",
-      project: flat[5] ?? "",
-      vorgang: flat[6] ?? "",
-      taetigkeit: flat[7] ?? "",
-      billable: /payments/i.test(flat[8] ?? "") || /payments/i.test(row.html),
-      comment: flat[9] ?? "",
+      from: flat[from] ?? "",
+      to: flat[from + 1] ?? "",
+      duration: flat[from + 2] ?? "",
+      project: flat[from + 4] ?? "",
+      vorgang: flat[from + 5] ?? "",
+      taetigkeit: flat[from + 6] ?? "",
+      billable: /payments/i.test(flat[from + 7] ?? "") || /payments/i.test(row.html),
+      comment: flat[from + 8] ?? "",
+      ort: bookingOrt(flat, from),
     });
   }
 

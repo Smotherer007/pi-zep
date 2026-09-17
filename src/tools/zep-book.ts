@@ -85,7 +85,10 @@ export const ZepBookTool = {
       }),
     ),
     ort: Type.Optional(
-      Type.String({ description: "Location code, e.g. 'D-Office' or 'D'. Defaults to 'NULL' (first place of work)." }),
+      Type.String({
+        description:
+          "Location code, e.g. 'D-Office' (office), 'D' (inland away) or 'D-3M'. The default 'NULL' is the first place of work (Erste Tätigkeitsstätte).",
+      }),
     ),
     entries: Type.Optional(
       Type.Array(
@@ -228,6 +231,10 @@ export const ZepBookTool = {
         const comment = entry.bemerkung ?? params.bemerkung ?? "";
 
         const vorgangLabel = scope.vorgaenge.find((v) => v.id === vorgangId)?.label;
+        // Always state the place of work that goes onto the wire: 'NULL' is
+        // the default (Erste Tätigkeitsstätte) and is exactly what a booking
+        // without an explicit ort gets, so it must not be invisible here.
+        const ortLabel = form.orte.find((o) => o.id === ort)?.label;
 
         planned.push({
           request: {
@@ -245,7 +252,8 @@ export const ZepBookTool = {
             `${date}  ${from}-${to}  (${duration})\n` +
             `         project ${projectId}${scope.project ? ` "${scope.project.label}"` : ""}\n` +
             `         Vorgang ${vorgangId}${vorgangLabel ? ` "${vorgangLabel}"` : ""}\n` +
-            `         Tätigkeit ${taetigkeit}${ort === "NULL" ? "" : `, Ort ${ort}`}` +
+            `         Tätigkeit ${taetigkeit}, Ort ${ort}` +
+            `${ortLabel && ortLabel !== ort ? ` (${ortLabel})` : ""}` +
             `${comment ? `\n         "${comment}"` : ""}`,
         });
       }

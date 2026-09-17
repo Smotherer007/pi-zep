@@ -94,6 +94,13 @@ export interface ZepBooking {
   readonly taetigkeit: string;
   readonly billable: boolean;
   readonly comment: string;
+  /**
+   * Place of work as the table renders it, e.g. `D-Office`.
+   *
+   * ZEP only draws this cell when there is something to say, so `null` means
+   * "no cell rendered" and therefore the default place of work (`NULL`).
+   */
+  readonly ort: string | null;
 }
 
 export interface ZepWeekDay {

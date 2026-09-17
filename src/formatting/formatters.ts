@@ -65,7 +65,8 @@ export function formatWeek(week: ZepWeek): string {
       lines.push(
         `    #${booking.objectId ?? "?"}  ${booking.from}-${booking.to} (${booking.duration})  ` +
           `${booking.project} / ${booking.vorgang} / ${booking.taetigkeit}` +
-          `${booking.billable ? " [billable]" : ""}`,
+          `${booking.billable ? " [billable]" : ""}` +
+          `${booking.ort ? `  @ ${booking.ort}` : ""}`,
       );
       if (booking.comment) lines.push(`        ${booking.comment}`);
     }
