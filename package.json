@@ -1,6 +1,6 @@
 {
   "name": "@patimweb/pi-zep",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "ZEP time-tracking for pi coding agent — book project times (Projektzeiten) on zep-online.de over plain HTTP, without the paid ZEP API",
   "keywords": [
     "pi-package",
